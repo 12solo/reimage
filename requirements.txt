@@ -7,7 +7,7 @@ opencv-python-headless
 pytesseract
 pdf2image
 paddleocr
-paddlepaddle-gpu
+paddlepaddle  # <-- Changed from paddlepaddle-gpu
 torch
 torchvision
 transformers
