@@ -9,7 +9,7 @@ class ScientificOCREngine:
     def __init__(self):
         if PADDLE_AVAILABLE:
             # Enable English and specific models trained on mathematical/scientific structures
-            self.ocr = PaddleOCR(use_angle_cls=True, lang='en', show_log=False)
+            self.ocr = PaddleOCR(use_angle_cls=True, lang='en')
         else:
             self.ocr = None
 
