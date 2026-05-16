@@ -1,7 +1,7 @@
 streamlit>=1.35.0
 streamlit-drawable-canvas-fix
 pillow
-numpy
+numpy<2.0.0
 pandas
 opencv-python-headless
 pytesseract
