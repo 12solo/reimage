@@ -1,4 +1,5 @@
 import numpy as np
+import cv2
 try:
     from paddleocr import PaddleOCR
     PADDLE_AVAILABLE = True
