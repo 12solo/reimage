@@ -1,0 +1,31 @@
+# Use NVIDIA CUDA base image for PyTorch / AI Models
+FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
+
+# Set non-interactive timezone
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install System Dependencies (Tesseract, Poppler, OpenCV requirements)
+RUN apt-get update && apt-get install -y \
+    python3.10 \
+    python3-pip \
+    tesseract-ocr \
+    libtesseract-dev \
+    poppler-utils \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip3 install --no-cache-dir -r requirements.txt
+
+# Copy application files
+COPY . .
+
+# Expose Streamlit port
+EXPOSE 8501
+
+CMD ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
