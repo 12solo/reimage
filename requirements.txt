@@ -1,8 +1,8 @@
-streamlit
+streamlit==1.35.0
 pillow
 numpy
 opencv-python-headless
 pytesseract
 pdf2image
 pandas
-streamlit-drawable-canvas  # <-- New vital dependency
+streamlit-drawable-canvas
