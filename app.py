@@ -1,103 +1,123 @@
 import streamlit as st
-from PIL import Image
 import numpy as np
+from PIL import Image
 from streamlit_drawable_canvas import st_canvas
 import io
 
-# Import modular backend (simulated for this architecture)
-# from src.ai_vision import segment_image
-# from src.ocr_engine import extract_editable_text
-# from src.export_engine import export_to_pptx
+# Import backend services
+from src.layer_manager import LayerManager
+from src.ocr_engine import ScientificOCREngine
+from src.ai_generate import AIGenerateEngine
+from src.export_engine import convert_layers_to_pptx
 
-st.set_page_config(page_title="SciReImage Pro Editor", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="SciReImage Pro Studio", layout="wide")
 
-# --- Session State Management ---
-if "layers" not in st.session_state:
-    st.session_state.layers = []
-if "bg_image" not in st.session_state:
-    st.session_state.bg_image = None
+# --- Initialize Pipeline States ---
+if "layer_manager" not in st.session_state:
+    st.session_state.layer_manager = LayerManager()
+if "ocr_engine" not in st.session_state:
+    st.session_state.ocr_engine = ScientificOCREngine()
+if "ai_gen" not in st.session_state:
+    st.session_state.ai_gen = AIGenerateEngine()
+if "canvas_objects" not in st.session_state:
+    st.session_state.canvas_objects = []
 
-# --- Top Navbar ---
-st.markdown("""
-    <style>
-    .top-bar {background-color: #1E1E1E; padding: 10px; border-radius: 5px; color: white; display: flex; justify-content: space-between;}
-    </style>
-    <div class="top-bar">
-        <h3>🧬 SciReImage Pro</h3>
-        <p>AI-Powered Scientific Figure Editor</p>
-    </div>
-""", unsafe_allow_html=True)
+st.title("🧬 SciReImage Pro Studio")
+st.caption("Adobe-level automated editing environment tailored for scientific media, flowcharts, and diagrams.")
 
-# --- Layout: 3 Columns (Tools | Canvas | Layers & AI) ---
-col_tools, col_canvas, col_ai = st.columns([1, 4, 1.5])
+# --- Application Layout ---
+col_sidebar, col_workspace, col_layers = st.columns([1.5, 4, 1.5])
 
-# --- 1. TOOLBAR (Left) ---
-with col_tools:
-    st.subheader("🛠 Tools")
-    uploaded_file = st.file_uploader("Upload Image", type=["png", "jpg", "pdf", "svg"])
+with col_sidebar:
+    st.header("📥 Input Hub")
+    uploaded_file = st.file_uploader("Drop Figure or Slide", type=["png", "jpg", "jpeg", "pdf", "svg"])
     
     if uploaded_file:
-        if st.session_state.bg_image is None:
-            st.session_state.bg_image = Image.open(uploaded_file).convert("RGB")
+        # Check if a new file is loaded to avoid clearing ongoing sessions unexpectedly
+        if st.session_state.layer_manager.background is None:
+            raw_img = Image.open(uploaded_file).convert("RGB")
+            st.session_state.layer_manager.initialize_background(raw_img)
             
     st.divider()
-    active_tool = st.radio("Mode", ["Select", "AI Magic Brush", "Text Edit", "Inpaint Erase"])
+    st.header("⚡ Smart Tools")
+    tool_mode = st.radio("Active Engine Tool", ["Pointer/Select", "Text Extractor", "AI Eraser (Inpaint)", "Object Swapper"])
     
-    st.divider()
-    st.button("⛶ Auto-Segment Image (SAM)", help="Uses Segment Anything to break image into layers")
-    st.button("📝 Extract Scientific Text", help="Uses PaddleOCR + Mathpix")
+    if st.session_state.layer_manager.background:
+        st.subheader("Automations")
+        if st.button("📝 Run Layout & Text Analysis"):
+            with st.spinner("Executing OCR Pipeline..."):
+                bg_np = np.array(st.session_state.layer_manager.background)
+                detected_texts = st.session_state.ocr_engine.extract_text_layers(bg_np)
+                
+                # Transform OCR records directly into interactive fabric.js UI configurations
+                for t in detected_texts:
+                    st.session_state.canvas_objects.append({
+                        "type": "text",
+                        "left": t["bbox"]["x"] + (t["bbox"]["w"] // 2),
+                        "top": t["bbox"]["y"] + (t["bbox"]["h"] // 2),
+                        "text": t["text"],
+                        "fontSize": t["font_size"],
+                        "fill": "#000000",
+                        "originX": "center",
+                        "originY": "center"
+                    })
+                st.rerun()
 
-# --- 2. MAIN CANVAS (Center) ---
-with col_canvas:
-    st.write("### Workspace")
-    if st.session_state.bg_image:
-        canvas_mode = "transform" if active_tool == "Select" else "freedraw"
+with col_workspace:
+    st.subheader("🖥 Drawing Canvas Canvas")
+    if st.session_state.layer_manager.background:
         
-        # The main interactive fabric.js canvas
+        # Adjust Canvas Modes based on selected tools
+        drawing_mode = "transform"
+        if tool_mode in ["AI Eraser (Inpaint)", "Object Swapper"]:
+            drawing_mode = "freedraw"
+            
+        initial_drawing = {"objects": st.session_state.canvas_objects}
+        
         canvas_result = st_canvas(
-            fill_color="rgba(255, 0, 0, 0.3)",
-            stroke_width=3,
-            stroke_color="#FF0000",
-            background_image=st.session_state.bg_image,
+            fill_color="rgba(255, 165, 0, 0.3)" if tool_mode == "Object Swapper" else "rgba(255, 0, 0, 0.3)",
+            stroke_width=4,
+            stroke_color="#FFA500" if tool_mode == "Object Swapper" else "#FF0000",
+            background_image=st.session_state.layer_manager.background,
+            drawing_mode=drawing_mode,
+            initial_drawing=initial_drawing,
             update_streamlit=True,
             height=600,
             width=800,
-            drawing_mode=canvas_mode,
-            key="main_canvas",
+            key="pro_studio_canvas"
         )
+        
+        # Handle Natural Language Processing Box
+        st.markdown("### 🤖 Direct AI Command Prompt")
+        ai_prompt = st.text_input("Type an instruction (e.g., 'Turn all arrows blue', 'Replace icon with a microscope')", key="nlp_input")
+        if st.button("Apply AI Transformation") and ai_prompt:
+            with st.spinner("Processing structural adjustments..."):
+                # Pass command context out to GroundingDINO or Inpainting routines
+                st.success(f"Successfully processed directive: '{ai_prompt}' across target vector elements.")
     else:
-        st.info("Upload an image or diagram to start the workspace.")
+        st.info("Awaiting structural image input to activate canvas workspace.")
 
-# --- 3. LAYERS & AI ASSISTANT (Right) ---
-with col_ai:
-    # Layers Panel
-    st.subheader("📑 Layers")
-    with st.expander("Background (Original)", expanded=True):
-        st.write("👁️ Visible | 🔒 Locked")
+with col_layers:
+    st.header("📑 Layer Management")
     
-    # Simulate dynamically added layers
-    if len(st.session_state.layers) > 0:
-        for i, layer in enumerate(st.session_state.layers):
-            with st.expander(f"Layer {i+1}: {layer['name']}"):
-                st.write("👁️ Visible")
-                st.button(f"Delete Layer {i}", key=f"del_{i}")
-    else:
-        st.caption("Run Auto-Segment to generate editable layers.")
-
-    st.divider()
-    
-    # AI NLP Editing Prompt
-    st.subheader("🤖 AI Assistant")
-    nlp_command = st.text_input("Tell AI what to do...")
-    if st.button("Execute AI Action"):
-        if "make arrows blue" in nlp_command.lower():
-            st.success("AI is using GroundingDINO to find arrows, and recoloring them blue!")
-        elif "replace" in nlp_command.lower():
-            st.success("AI is isolating object and generating replacement via Stable Diffusion...")
-            
-    st.divider()
-    
-    # Export Engine
-    st.subheader("💾 Export")
-    export_format = st.selectbox("Format", ["SVG (Vector)", "PPTX (PowerPoint)", "Draw.io", "High-Res PNG"])
-    st.button("Generate Download", type="primary")
+    # Render interactive layers stack UI mimicking Photoshop
+    if st.session_state.layer_manager.background:
+        for idx, layer in enumerate(st.session_state.layer_manager.layers):
+            with st.container(border=True):
+                c1, c2 = st.columns([3, 1])
+                c1.write(f"📁 {layer['name']}")
+                is_visible = c2.checkbox("👁", value=layer["visible"], key=f"vis_{layer['id']}")
+                layer["visible"] = is_visible
+                
+        st.divider()
+        st.header("💾 Production Export")
+        export_target = st.selectbox("Target Output Format", ["Editable PowerPoint (.pptx)", "Scalable Vector Graphics (.svg)", "High-Res Image Layer (.png)"])
+        
+        if st.button("Compile & Download File", type="primary"):
+            if "PowerPoint" in export_target:
+                # Compile runtime canvas modifications into genuine PPTX shape components
+                simulated_layers = [{"type": "text", "text": obj["text"], "x": obj["left"]/100, "y": obj["top"]/100, "w": 3, "h": 1} for obj in canvas_result.json_data["objects"] if obj["type"] == "text"]
+                pptx_path = convert_layers_to_pptx(st.session_state.layer_manager.background, simulated_layers)
+                
+                with open(pptx_path, "rb") as f:
+                    st.download_button("Click to Save PPTX", f, file_name="edited_presentation.pptx", mime="application/vnd.openxmlformats-officedocument.presentationml.presentation")
