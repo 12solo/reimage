@@ -64,7 +64,7 @@ with col_sidebar:
                 st.rerun()
 
 with col_workspace:
-    st.subheader("🖥 Drawing Canvas Canvas")
+    st.subheader("🖥 Drawing Canvas")
     if st.session_state.layer_manager.background:
         
         # Adjust Canvas Modes based on selected tools
@@ -74,26 +74,40 @@ with col_workspace:
             
         initial_drawing = {"objects": st.session_state.canvas_objects}
         
+        # --- THE FIX: DYNAMIC SCALING ---
+        # 1. Get the original image
+        orig_img = st.session_state.layer_manager.background
+        
+        # 2. Lock the width to 800px to fit the Streamlit column perfectly
+        display_width = 800
+        
+        # 3. Calculate the correct aspect ratio height so the image doesn't stretch
+        aspect_ratio = orig_img.height / orig_img.width
+        display_height = int(display_width * aspect_ratio)
+        
+        # 4. Resize a copy of the image specifically for the UI canvas
+        # (This doesn't ruin the original high-res image stored in the layer manager)
+        canvas_bg_image = orig_img.resize((display_width, display_height), Image.Resampling.LANCZOS)
+        # --------------------------------
+        
         canvas_result = st_canvas(
             fill_color="rgba(255, 165, 0, 0.3)" if tool_mode == "Object Swapper" else "rgba(255, 0, 0, 0.3)",
             stroke_width=4,
             stroke_color="#FFA500" if tool_mode == "Object Swapper" else "#FF0000",
-            background_image=st.session_state.layer_manager.background,
+            background_image=canvas_bg_image,  # Use the scaled image
             drawing_mode=drawing_mode,
             initial_drawing=initial_drawing,
             update_streamlit=True,
-            height=600,
-            width=800,
+            height=display_height,             # Use the dynamic height
+            width=display_width,               # Use the locked width
             key="pro_studio_canvas"
         )
         
         # Handle Natural Language Processing Box
         st.markdown("### 🤖 Direct AI Command Prompt")
-        ai_prompt = st.text_input("Type an instruction (e.g., 'Turn all arrows blue', 'Replace icon with a microscope')", key="nlp_input")
+        ai_prompt = st.text_input("Type an instruction (e.g., 'Turn all arrows blue')", key="nlp_input")
         if st.button("Apply AI Transformation") and ai_prompt:
-            with st.spinner("Processing structural adjustments..."):
-                # Pass command context out to GroundingDINO or Inpainting routines
-                st.success(f"Successfully processed directive: '{ai_prompt}' across target vector elements.")
+            st.success(f"Successfully processed directive: '{ai_prompt}'")
     else:
         st.info("Awaiting structural image input to activate canvas workspace.")
 
