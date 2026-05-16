@@ -15,6 +15,29 @@ RUN apt-get update && apt-get install -y \
     libglib2.0-0 \
     git \
     && rm -rf /var/lib/apt/lists/*
+version: '3.8'
+
+services:
+  scireimage-web:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    container_name: scireimage_pro_app
+    ports:
+      - "8501:8501"
+    volumes:
+      - .:/app  # Maps your local code into the container for live-reloading
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all  # Grants access to all available GPUs
+      - STREAMLIT_SERVER_MAX_UPLOAD_SIZE=50 # Allows uploading high-res 50MB PDFs
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command: streamlit run app.py --server.port=8501 --server.address=0.0.0.0
 
 WORKDIR /app
 
