@@ -1,57 +1,41 @@
+import pytesseract
 import numpy as np
-import cv2
-
-try:
-    from paddleocr import PaddleOCR
-    PADDLE_AVAILABLE = True
-except ImportError:
-    PADDLE_AVAILABLE = False
 
 class ScientificOCREngine:
     def __init__(self):
-        if PADDLE_AVAILABLE:
-            # The configuration happens ONLY here now
-            self.ocr = PaddleOCR(use_angle_cls=True, lang='en')
-        else:
-            self.ocr = None
+        # We are bypassing PaddleOCR and using the much more stable Tesseract engine
+        self.engine_name = "Tesseract"
 
     def extract_text_layers(self, image_np):
         """
-        Scans the image and returns a list of dictionaries formatting the text 
-        as editable layers for the Streamlit canvas.
+        Scans the image using PyTesseract and returns a list of dictionaries 
+        formatting the text as editable layers for the Streamlit canvas.
         """
-        if not self.ocr:
-            raise RuntimeError("PaddleOCR is not installed.")
-
-        # 1. Convert the incoming RGB numpy array into OpenCV's native BGR format
-        bgr_image = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
-        
-        # 2. Run OCR strictly with just the image array (no extra arguments!)
-        results = self.ocr.ocr(bgr_image)
+        # Run Tesseract to get text, bounding boxes, and confidence scores
+        data = pytesseract.image_to_data(image_np, output_type=pytesseract.Output.DICT)
         
         text_layers = []
         
-        if results and results[0]:
-            for idx, line in enumerate(results[0]):
-                box = line[0]     # Polygon coordinates
-                text = line[1][0] # The actual text string
-                conf = line[1][1] # Confidence score
-                
-                # Convert polygon to standard X, Y, Width, Height
-                x_coords = [point[0] for point in box]
-                y_coords = [point[1] for point in box]
-                x, y = min(x_coords), min(y_coords)
-                w, h = max(x_coords) - x, max(y_coords) - y
+        for i in range(len(data['text'])):
+            conf = int(data['conf'][i])
+            text = data['text'][i].strip()
+            
+            # Filter out noise: empty text or very low confidence predictions (< 40)
+            if conf > 40 and text != "":
+                x = data['left'][i]
+                y = data['top'][i]
+                w = data['width'][i]
+                h = data['height'][i]
                 
                 # Create a layer object compatible with Fabric.js (st_canvas)
                 text_layers.append({
-                    "id": f"text_{idx}",
+                    "id": f"text_{i}",
                     "name": f"Text: {text[:10]}...",
                     "type": "text",
                     "text": text,
-                    "confidence": conf,
-                    "bbox": {"x": int(x), "y": int(y), "w": int(w), "h": int(h)},
-                    "font_size": int(h * 0.8), 
+                    "confidence": float(conf) / 100.0,
+                    "bbox": {"x": x, "y": y, "w": w, "h": h},
+                    "font_size": int(h * 0.8), # Estimate font size from bounding box
                     "color": "#000000"
                 })
                 
