@@ -1,5 +1,6 @@
 import numpy as np
 import cv2
+
 try:
     from paddleocr import PaddleOCR
     PADDLE_AVAILABLE = True
@@ -9,7 +10,7 @@ except ImportError:
 class ScientificOCREngine:
     def __init__(self):
         if PADDLE_AVAILABLE:
-            # Enable English and specific models trained on mathematical/scientific structures
+            # The configuration happens ONLY here now
             self.ocr = PaddleOCR(use_angle_cls=True, lang='en')
         else:
             self.ocr = None
@@ -20,9 +21,14 @@ class ScientificOCREngine:
         as editable layers for the Streamlit canvas.
         """
         if not self.ocr:
-            raise RuntimeError("PaddleOCR is not installed. GPU environment required.")
+            raise RuntimeError("PaddleOCR is not installed.")
 
-        results = self.ocr.ocr(image_np, cls=True)
+        # 1. Convert the incoming RGB numpy array into OpenCV's native BGR format
+        bgr_image = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
+        
+        # 2. Run OCR strictly with just the image array (no extra arguments!)
+        results = self.ocr.ocr(bgr_image)
+        
         text_layers = []
         
         if results and results[0]:
@@ -45,7 +51,7 @@ class ScientificOCREngine:
                     "text": text,
                     "confidence": conf,
                     "bbox": {"x": int(x), "y": int(y), "w": int(w), "h": int(h)},
-                    "font_size": int(h * 0.8), # Estimate font size based on bounding box height
+                    "font_size": int(h * 0.8), 
                     "color": "#000000"
                 })
                 
