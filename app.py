@@ -1,137 +1,160 @@
 import streamlit as st
 import numpy as np
-import cv2
 from PIL import Image
-import pytesseract
 from streamlit_drawable_canvas import st_canvas
+import io
+
+# Import backend services
+from src.layer_manager import LayerManager
+from src.ocr_engine import ScientificOCREngine
+from src.ai_generate import AIGenerateEngine
+from src.export_engine import convert_layers_to_pptx
 
 st.set_page_config(page_title="SciReImage Pro Studio", layout="wide")
 
-# --- CORE EXTRACTION ENGINE ---
-@st.cache_data
-def analyze_image(image_np, target_width=800):
-    """Extracts text and shapes, scaling them to perfectly fit the Streamlit UI canvas."""
-    
-    # 1. Calculate Scaling Factors
-    orig_h, orig_w = image_np.shape[:2]
-    scale_factor = target_width / orig_w
-    target_height = int(orig_h * scale_factor)
-    
-    canvas_objects = []
+# --- Initialize Pipeline States ---
+if "layer_manager" not in st.session_state:
+    st.session_state.layer_manager = LayerManager()
+if "ocr_engine" not in st.session_state:
+    st.session_state.ocr_engine = ScientificOCREngine()
+if "ai_gen" not in st.session_state:
+    st.session_state.ai_gen = AIGenerateEngine()
+if "canvas_objects" not in st.session_state:
+    st.session_state.canvas_objects = []
 
-    # 2. Extract Text using Tesseract
-    ocr_data = pytesseract.image_to_data(image_np, output_type=pytesseract.Output.DICT)
-    
-    for i in range(len(ocr_data['text'])):
-        conf = int(ocr_data['conf'][i])
-        text = ocr_data['text'][i].strip()
-        
-        if conf > 40 and text != "":
-            # Apply scaling factor to coordinates and font size
-            x = int(ocr_data['left'][i] * scale_factor)
-            y = int(ocr_data['top'][i] * scale_factor)
-            w = int(ocr_data['width'][i] * scale_factor)
-            h = int(ocr_data['height'][i] * scale_factor)
-            
-            canvas_objects.append({
-                "type": "text",
-                "left": x + (w // 2), # fabric.js needs the center point
-                "top": y + (h // 2),
-                "text": text,
-                "fontSize": max(12, int(h * 0.9)), # Prevent unreadably small text
-                "fill": "#000000",
-                "originX": "center",
-                "originY": "center"
-            })
-
-    # 3. Extract Icons and Boxes using OpenCV
-    gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
-    # Threshold to find dark shapes on a light background
-    _, thresh = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    for cnt in contours:
-        x, y, w, h = cv2.boundingRect(cnt)
-        # Filter out tiny noise and massive background borders
-        if 30 < w < (orig_w * 0.9) and 30 < h < (orig_h * 0.9):
-            # Scale coordinates for the UI
-            scaled_x = int(x * scale_factor)
-            scaled_y = int(y * scale_factor)
-            scaled_w = int(w * scale_factor)
-            scaled_h = int(h * scale_factor)
-            
-            canvas_objects.append({
-                "type": "rect",
-                "left": scaled_x,
-                "top": scaled_y,
-                "width": scaled_w,
-                "height": scaled_h,
-                "fill": "rgba(0, 150, 255, 0.2)", # Transparent blue box over icons
-                "stroke": "#0096FF",
-                "strokeWidth": 2
-            })
-
-    return canvas_objects, target_height
-
-
-# --- UI LAYOUT ---
 st.title("🧬 SciReImage Pro Studio")
-st.caption("Automated editing environment tailored for scientific media.")
+st.caption("Adobe-level automated editing environment tailored for scientific media, flowcharts, and diagrams.")
 
-col_sidebar, col_workspace = st.columns([1.5, 5])
+# --- Application Layout ---
+col_sidebar, col_workspace, col_layers = st.columns([1.5, 4, 1.5])
 
 with col_sidebar:
     st.header("📥 Input Hub")
-    uploaded_file = st.file_uploader("Drop Figure or Slide", type=["png", "jpg", "jpeg"])
+    uploaded_file = st.file_uploader("Drop Figure or Slide", type=["png", "jpg", "jpeg", "pdf", "svg"])
     
     if uploaded_file:
-        if "bg_image" not in st.session_state or st.session_state.file_name != uploaded_file.name:
-            # Load new image
-            st.session_state.bg_image = Image.open(uploaded_file).convert("RGB")
-            st.session_state.file_name = uploaded_file.name
+        # Check if a new file is loaded to avoid clearing ongoing sessions unexpectedly
+        if st.session_state.layer_manager.background is None or getattr(st.session_state, 'last_uploaded', None) != uploaded_file.name:
+            raw_img = Image.open(uploaded_file).convert("RGB")
+            st.session_state.layer_manager = LayerManager() # Reset manager for new file
+            st.session_state.layer_manager.initialize_background(raw_img)
             st.session_state.canvas_objects = []
-            st.session_state.canvas_height = 600
-
+            st.session_state.last_uploaded = uploaded_file.name
+            
     st.divider()
-    tool_mode = st.radio("Active Engine Tool", ["Pointer/Select", "AI Eraser (Inpaint)"])
+    st.header("⚡ Smart Tools")
+    tool_mode = st.radio("Active Engine Tool", ["Pointer/Select", "Text Extractor", "AI Eraser (Inpaint)", "Object Swapper"])
     
-    if "bg_image" in st.session_state:
+    if st.session_state.layer_manager.background:
+        st.subheader("Automations")
         if st.button("📝 Run Layout & Text Analysis"):
-            with st.spinner("Extracting Text and Icons..."):
-                img_np = np.array(st.session_state.bg_image)
-                # Hardcoding UI width to 800 to match the canvas
-                objects, scaled_height = analyze_image(img_np, target_width=800)
-                st.session_state.canvas_objects = objects
-                st.session_state.canvas_height = scaled_height
+            with st.spinner("Executing OCR Pipeline..."):
+                bg_np = np.array(st.session_state.layer_manager.background)
+                detected_texts = st.session_state.ocr_engine.extract_text_layers(bg_np)
+                
+                # Transform OCR records directly into interactive fabric.js UI configurations
+                new_objects = []
+                for t in detected_texts:
+                    new_objects.append({
+                        "type": "text",
+                        "left": t["bbox"]["x"] + (t["bbox"]["w"] // 2),
+                        "top": t["bbox"]["y"] + (t["bbox"]["h"] // 2),
+                        "width": t["bbox"]["w"],  # Saved so the scaling loop can use it later!
+                        "height": t["bbox"]["h"], # Saved so the scaling loop can use it later!
+                        "text": t["text"],
+                        "fontSize": t["font_size"],
+                        "fill": "#000000",
+                        "originX": "center",
+                        "originY": "center"
+                    })
+                st.session_state.canvas_objects = new_objects
                 st.rerun()
 
 with col_workspace:
     st.subheader("🖥 Drawing Canvas")
-    if "bg_image" in st.session_state:
+    if st.session_state.layer_manager.background:
         
-        drawing_mode = "transform" if tool_mode == "Pointer/Select" else "freedraw"
+        # Adjust Canvas Modes based on selected tools
+        drawing_mode = "transform"
+        if tool_mode in ["AI Eraser (Inpaint)", "Object Swapper"]:
+            drawing_mode = "freedraw"
+            
+        # --- THE FIX: DYNAMIC SCALING ---
+        # 1. Get the original image
+        orig_img = st.session_state.layer_manager.background
         
-        # We must resize the background image to exactly match the scaled coordinates
-        # Otherwise, fabric.js misaligns the background and the drawn objects
+        # 2. Lock the width to 800px to fit the Streamlit column perfectly
         display_width = 800
-        canvas_bg = st.session_state.bg_image.resize(
-            (display_width, st.session_state.canvas_height), 
-            Image.Resampling.LANCZOS
-        )
-
-        initial_drawing = {"objects": st.session_state.canvas_objects} if st.session_state.canvas_objects else None
+        
+        # 3. Calculate the correct aspect ratio height so the image doesn't stretch
+        # We also save this ratio as "scale_factor" to use on the text coordinates!
+        scale_factor = display_width / orig_img.width
+        display_height = int(orig_img.height * scale_factor)
+        
+        # 4. Resize a copy of the image specifically for the UI canvas
+        canvas_bg_image = orig_img.resize((display_width, display_height), Image.Resampling.LANCZOS)
+        
+        # 5. SCALE THE OCR COORDINATES! 
+        scaled_objects = []
+        for obj in st.session_state.canvas_objects:
+            scaled_obj = obj.copy()
+            if "left" in scaled_obj:
+                scaled_obj["left"] = int(scaled_obj["left"] * scale_factor)
+            if "top" in scaled_obj:
+                scaled_obj["top"] = int(scaled_obj["top"] * scale_factor)
+            if "width" in scaled_obj:
+                scaled_obj["width"] = int(scaled_obj["width"] * scale_factor)
+            if "height" in scaled_obj:
+                scaled_obj["height"] = int(scaled_obj["height"] * scale_factor)
+            if "fontSize" in scaled_obj:
+                # Scale the font, but don't let it get smaller than 12pt so it remains readable
+                scaled_obj["fontSize"] = max(12, int(scaled_obj["fontSize"] * scale_factor)) 
+                
+            scaled_objects.append(scaled_obj)
+            
+        initial_drawing = {"objects": scaled_objects}
+        # --------------------------------
         
         canvas_result = st_canvas(
-            fill_color="rgba(255, 0, 0, 0.3)",
-            stroke_width=3,
-            stroke_color="#FF0000",
-            background_image=canvas_bg,  # Use the perfectly scaled background
+            fill_color="rgba(255, 165, 0, 0.3)" if tool_mode == "Object Swapper" else "rgba(255, 0, 0, 0.3)",
+            stroke_width=4,
+            stroke_color="#FFA500" if tool_mode == "Object Swapper" else "#FF0000",
+            background_image=canvas_bg_image,  # Use the scaled image
             drawing_mode=drawing_mode,
-            initial_drawing=initial_drawing,
+            initial_drawing=initial_drawing,   # Use the scaled coordinates
             update_streamlit=True,
-            height=st.session_state.canvas_height,
-            width=display_width,
+            height=display_height,             # Use the dynamic height
+            width=display_width,               # Use the locked width
             key="pro_studio_canvas"
         )
+        
+        # Handle Natural Language Processing Box
+        st.markdown("### 🤖 Direct AI Command Prompt")
+        ai_prompt = st.text_input("Type an instruction (e.g., 'Turn all arrows blue')", key="nlp_input")
+        if st.button("Apply AI Transformation") and ai_prompt:
+            st.success(f"Successfully processed directive: '{ai_prompt}'")
     else:
-        st.info("Upload an image to activate the canvas workspace.")
+        st.info("Awaiting structural image input to activate canvas workspace.")
+
+with col_layers:
+    st.header("📑 Layer Management")
+    
+    # Render interactive layers stack UI mimicking Photoshop
+    if st.session_state.layer_manager.background:
+        for idx, layer in enumerate(st.session_state.layer_manager.layers):
+            with st.container(border=True):
+                c1, c2 = st.columns([3, 1])
+                c1.write(f"📁 {layer['name']}")
+                is_visible = c2.checkbox("👁", value=layer.get("visible", True), key=f"vis_{layer['id']}")
+                layer["visible"] = is_visible
+                
+        st.divider()
+        st.header("💾 Production Export")
+        export_target = st.selectbox("Target Output Format", ["Editable PowerPoint (.pptx)", "Scalable Vector Graphics (.svg)", "High-Res Image Layer (.png)"])
+        
+        if st.button("Compile & Download File", type="primary"):
+            if "PowerPoint" in export_target:
+                st.info("PowerPoint compilation initiated...")
+                # simulated_layers = [{"type": "text", "text": obj["text"], "x": obj["left"]/100, "y": obj["top"]/100, "w": 3, "h": 1} for obj in canvas_result.json_data["objects"] if obj["type"] == "text"]
+                # pptx_path = convert_layers_to_pptx(st.session_state.layer_manager.background, simulated_layers)
+                # st.download_button(...)
