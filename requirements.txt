@@ -4,6 +4,4 @@ numpy
 opencv-python-headless
 pytesseract
 pdf2image
-paddleocr
-paddlepaddle
 pandas
