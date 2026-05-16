@@ -1,168 +1,210 @@
 import streamlit as st
-import cv2
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 import pytesseract
-import pandas as pd
 from pdf2image import convert_from_bytes
+from streamlit_drawable_canvas import st_canvas
 import io
+import json
 
-# Optional: Import PaddleOCR for advanced extraction
-try:
-    from paddleocr import PaddleOCR
-    PADDLE_AVAILABLE = True
-except ImportError:
-    PADDLE_AVAILABLE = False
+st.set_page_config(page_title="High-Res Diagram Editor", layout="wide")
 
-st.set_page_config(page_title="Image to Editable UI", layout="wide")
+# --- Helper Functions ---
 
-@st.cache_resource
-def load_paddle_ocr():
-    if PADDLE_AVAILABLE:
-        # Initialize PaddleOCR (English language, download models automatically)
-        return PaddleOCR(use_angle_cls=True, lang='en')
-    return None
-
-paddle_ocr = load_paddle_ocr()
-
-def process_pdf(file_bytes):
-    """Convert uploaded PDF bytes to a list of PIL Images."""
-    images = convert_from_bytes(file_bytes)
-    return images
-
-def extract_text_tesseract(image):
-    """Extract text and bounding boxes using Tesseract."""
-    data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
-    results = []
-    for i in range(len(data['text'])):
-        if int(data['conf'][i]) > 40 and data['text'][i].strip() != "":
-            x, y, w, h = data['left'][i], data['top'][i], data['width'][i], data['height'][i]
-            results.append({
-                "Text": data['text'][i],
-                "Confidence": data['conf'][i],
-                "Box": [x, y, w, h]
-            })
-    return results
-
-def extract_text_paddle(image_np):
-    """Extract text using PaddleOCR for better formatting detection."""
-    result = paddle_ocr.ocr(image_np, cls=True)
-    results = []
-    if result[0]:
-        for line in result[0]:
-            box = line[0]
-            text = line[1][0]
-            confidence = line[1][1]
-            
-            # Convert Paddle polygon box to x, y, w, h
-            x_coords = [point[0] for point in box]
-            y_coords = [point[1] for point in box]
-            x, y = min(x_coords), min(y_coords)
-            w, h = max(x_coords) - x, max(y_coords) - y
-            
-            results.append({
-                "Text": text,
-                "Confidence": float(confidence) * 100,
-                "Box": [int(x), int(y), int(w), int(h)]
-            })
-    return results
-
-def extract_shapes(image_np):
-    """Use OpenCV to find non-text objects (geometric shapes, boundaries)."""
-    gray = cv2.cvtColor(image_np, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    edges = cv2.Canny(blurred, 50, 150)
+def get_pytesseract_data(pil_image):
+    """Extracts text and bounding boxes from a PIL image."""
+    data = pytesseract.image_to_data(pil_image, output_type=pytesseract.Output.DICT)
+    parsed_objects = []
     
-    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    shapes = []
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
-        if area > 500: # Filter out tiny noise
-            x, y, w, h = cv2.boundingRect(cnt)
-            shapes.append([x, y, w, h])
-    return shapes
+    for i in range(len(data['text'])):
+        # Filter out noise (low confidence or empty text)
+        if int(data['conf'][i]) > 50 and data['text'][i].strip() != "":
+            x, y, w, h = data['left'][i], data['top'][i], data['width'][i], data['height'][i]
+            parsed_objects.append({
+                "text": data['text'][i],
+                "left": x,
+                "top": y,
+                "width": w,
+                "height": h
+            })
+    return parsed_objects
 
-# --- UI Layout ---
-st.title("📄 Image & Diagram to Editable Output")
-st.markdown("Upload scientific figures, scanned PDFs, or diagrams to extract editable text and object layers.")
+def scale_ocr_to_canvas(ocr_data, scale_factor_x, scale_factor_y):
+    """Scales full-res OCR coordinates down to fit the display canvas."""
+    canvas_objects = []
+    for obj in ocr_data:
+        canvas_objects.append({
+            "type": "text",
+            # We want to provide the *center* of the object to st_canvas
+            "left": int((obj["left"] + (obj["width"] / 2)) * scale_factor_x),
+            "top": int((obj["top"] + (obj["height"] / 2)) * scale_factor_y),
+            "text": obj["text"],
+            "fill": "#00FF00", # Initial Green color for OCR visibility
+            "fontSize": 20, # Initial small size for canvas
+            "originX": "center",
+            "originY": "center"
+        })
+    return canvas_objects
 
-# Sidebar Controls
-st.sidebar.header("Extraction Settings")
-ocr_engine = st.sidebar.radio("OCR Engine", ["PaddleOCR (Advanced)", "Tesseract (Standard)"] if PADDLE_AVAILABLE else ["Tesseract (Standard)"])
-extract_geometric = st.sidebar.checkbox("Extract Geometric Shapes & Boxes", value=True)
+def save_high_res(original_pil_image, canvas_json_data, canvas_width, canvas_height):
+    """Applies browser canvas edits back to the full-res original image."""
+    
+    # 1. Start with the original high-resolution image
+    output_image = original_pil_image.copy().convert("RGBA")
+    draw = ImageDraw.Draw(output_image)
+    
+    # 2. Calculate Scaling Factors (Canvas -> Original)
+    orig_w, orig_h = original_pil_image.size
+    scale_x = orig_w / canvas_width
+    scale_y = orig_h / canvas_height
+    
+    # 3. Load a default font (You might need to provide a path to a proper .ttf file for perfect results)
+    try:
+        font_default = ImageFont.load_default()
+    except:
+        # Fallback if no font system works
+        font_default = None
 
-# File Uploader
-uploaded_files = st.file_uploader(
-    "Drag and drop images or PDFs here", 
-    type=['png', 'jpg', 'jpeg', 'pdf', 'tiff', 'svg'], 
-    accept_multiple_files=True
-)
-
-if uploaded_files:
-    for uploaded_file in uploaded_files:
-        st.write("---")
-        st.subheader(f"Processing: {uploaded_file.name}")
-        
-        # Load Image(s)
-        images_to_process = []
-        if uploaded_file.name.lower().endswith('.pdf'):
-            pdf_images = process_pdf(uploaded_file.read())
-            images_to_process.extend(pdf_images)
-        else:
-            image = Image.open(uploaded_file).convert('RGB')
-            images_to_process.append(image)
-
-        for i, img in enumerate(images_to_process):
-            if len(images_to_process) > 1:
-                st.markdown(f"**Page {i+1}**")
+    # 4. Iterate through every object edited on the front-end
+    if "objects" in canvas_json_data:
+        for obj in canvas_json_data["objects"]:
+            if obj["type"] == "text":
+                # Get front-end properties
+                text_content = obj["text"]
                 
-            img_np = np.array(img)
-            
-            # --- Processing Pipeline ---
-            with st.spinner("Extracting objects and text..."):
-                # 1. OCR Extraction
-                if "Paddle" in ocr_engine:
-                    text_data = extract_text_paddle(img_np)
-                else:
-                    text_data = extract_text_tesseract(img)
+                # Scale front-end coordinates back to full-res
+                # Fabric.js (st_canvas) uses object center; Pillow uses top-left corner.
+                obj_orig_center_x = obj["left"] * scale_x
+                obj_orig_center_y = obj["top"] * scale_y
+                obj_scaled_width = obj["width"] * obj["scaleX"] * scale_x
+                obj_scaled_height = obj["height"] * obj["scaleY"] * scale_y
                 
-                # 2. Shape Extraction
-                shape_data = extract_shapes(img_np) if extract_geometric else []
-
-            # --- Visualization & Editing ---
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.markdown("**Original Preview (with detected layers)**")
-                # Draw bounding boxes for visualization
-                preview_img = img_np.copy()
-                for item in text_data:
-                    x, y, w, h = item["Box"]
-                    cv2.rectangle(preview_img, (x, y), (x+w, y+h), (0, 255, 0), 2) # Green for text
+                corner_x = obj_orig_center_x - (obj_scaled_width / 2)
+                corner_y = obj_orig_center_y - (obj_scaled_height / 2)
                 
-                for shape in shape_data:
-                    x, y, w, h = shape
-                    cv2.rectangle(preview_img, (x, y), (x+w, y+h), (255, 0, 0), 2) # Blue for shapes
-                    
-                st.image(preview_img, channels="BGR", use_column_width=True)
+                # Scale Font Size
+                final_font_size = int(obj["fontSize"] * obj["scaleX"] * scale_x)
+                
+                # Update Font with scaled size
+                if final_font_size > 0:
+                    try:
+                        # Attempt to load a real font if available, fallback to default scaled
+                        font = ImageFont.truetype("Arial.ttf", final_font_size)
+                    except:
+                        font = font_default # Pillow can't scale default font well
 
-            with col2:
-                st.markdown("**Editable Extracted Data**")
-                if text_data:
-                    df = pd.DataFrame(text_data)
-                    # Display as an editable dataframe
-                    edited_df = st.data_editor(
-                        df[["Text", "Confidence"]], 
-                        num_rows="dynamic",
-                        use_container_width=True,
-                        key=f"editor_{uploaded_file.name}_{i}"
-                    )
-                    
-                    st.download_button(
-                        label="Download Edited Text as CSV",
-                        data=edited_df.to_csv(index=False).encode('utf-8'),
-                        file_name=f"{uploaded_file.name}_extracted.csv",
-                        mime='text/csv'
-                    )
-                else:
-                    st.info("No text detected.")
+                # Extract Color (assuming hex, e.g., #FF0000FF)
+                fill_color = obj["fill"]
+                
+                # 5. Draw the text onto the full-resolution image
+                draw.text((corner_x, corner_y), text_content, font=font, fill=fill_color)
+                
+    return output_image.convert("RGB") # Remove alpha channel for saving as JPEG/PNG
+
+# --- UI Setup ---
+st.title("🖌️ Scientific Diagram & Photo Editor (High-Res)")
+st.markdown("""
+Upload a static image (flowchart, scan, figure). We'll convert the text into editable boxes. 
+Drag them, change the words, resize them, and download the full-resolution result.
+""")
+
+# Setup Sidebar
+with st.sidebar:
+    st.header("1. Upload & Settings")
+    uploaded_file = st.file_uploader("Upload Image/PDF", type=['png', 'jpg', 'jpeg', 'pdf'])
+    
+    canvas_width = st.slider("Display Canvas Width (Does not affect output resolution)", 400, 1600, 1000)
+    
+    st.markdown("---")
+    st.header("How to Edit:")
+    st.markdown("""
+    *   **Select:** Click an object.
+    *   **Move:** Drag selected object.
+    *   **Edit Text:** Double-click the green text box on the canvas.
+    *   **Resize:** Drag the corners of the selection box.
+    *   **Change Color/Size:** Use the object properties menu that appears on the canvas.
+    """)
+
+# --- Main App Logic ---
+
+if uploaded_file:
+    # 1. Load Original Image (Full Resolution)
+    if uploaded_file.name.lower().endswith('.pdf'):
+        # For simplicity in this example, only process page 1 of PDFs
+        pages = convert_from_bytes(uploaded_file.read(), first_page=1, last_page=1)
+        original_image = pages[0]
+    else:
+        original_image = Image.open(uploaded_file).convert('RGB')
+
+    orig_w, orig_h = original_image.size
+    
+    # 2. Run OCR (Once per upload)
+    # We store the OCR data in st.session_state so it doesn't re-run every rerun.
+    state_key_ocr = f"ocr_data_{uploaded_file.name}"
+    if state_key_ocr not in st.session_state:
+        with st.spinner("Analyzing diagram layout..."):
+            raw_ocr_data = get_pytesseract_data(original_image)
+            st.session_state[state_key_ocr] = raw_ocr_data
+    
+    ocr_data = st.session_state[state_key_ocr]
+
+    # 3. Handle Scaling for the Canvas Display
+    # We display a scaled version (e.g., 1000px wide) for performance in the browser.
+    display_scale_x = canvas_width / orig_w
+    canvas_height = int(orig_h * display_scale_x)
+    
+    # 4. Prepare initial canvas objects from scaled OCR
+    initial_drawing = {"objects": scale_ocr_to_canvas(ocr_data, display_scale_x, display_scale_x)}
+
+    # 5. The Interactive Canvas component
+    st.subheader("2. Interactive Editor Canvas")
+    
+    # We must use a unique key for the canvas based on the file name
+    canvas_result = st_canvas(
+        fill_color="rgba(0, 255, 0, 0.2)",  # Fill color for new drawings
+        stroke_width=2,
+        stroke_color="#00FF00",
+        background_image=original_image, # Streamlit automatically scales the background_image to fit width/height
+        update_streamlit=True,
+        width=canvas_width,
+        height=canvas_height,
+        drawing_mode="transform", # "transform" allows selecting/moving existing objects
+        initial_drawing=initial_drawing,
+        key=f"canvas_{uploaded_file.name}",
+    )
+
+    # 6. Handle Saving and Downloading
+    st.markdown("---")
+    st.subheader("3. Save Full-Resolution Result")
+    
+    if canvas_result.json_data is not None:
+        # We give the user a button to trigger the high-res rendering, 
+        # as it can be slow for large images.
+        if st.button("Generate High-Resolution Edited Image"):
+            with st.spinner("Applying edits to original high-res file..."):
+                
+                # Perform the backend rendering
+                final_image = save_high_res(
+                    original_image, 
+                    canvas_result.json_data, 
+                    canvas_width, 
+                    canvas_height
+                )
+                
+                # Display processed preview (scaled for UI)
+                st.image(final_image, caption="High-Res Output Preview", use_container_width=True)
+                
+                # Prepare download buffer
+                img_buffer = io.BytesIO()
+                final_image.save(img_buffer, format="PNG")
+                processed_bytes = img_buffer.getvalue()
+                
+                st.download_button(
+                    label=f"Download Edited Image ({orig_w}x{orig_h})",
+                    data=processed_bytes,
+                    file_name=f"edited_{uploaded_file.name}.png",
+                    mime="image/png"
+                )
+
+else:
+    st.info("👈 Please upload an image in the sidebar to begin.")
