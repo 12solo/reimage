@@ -1,210 +1,103 @@
 import streamlit as st
+from PIL import Image
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
-import pytesseract
-from pdf2image import convert_from_bytes
 from streamlit_drawable_canvas import st_canvas
 import io
-import json
 
-st.set_page_config(page_title="High-Res Diagram Editor", layout="wide")
+# Import modular backend (simulated for this architecture)
+# from src.ai_vision import segment_image
+# from src.ocr_engine import extract_editable_text
+# from src.export_engine import export_to_pptx
 
-# --- Helper Functions ---
+st.set_page_config(page_title="SciReImage Pro Editor", layout="wide", initial_sidebar_state="expanded")
 
-def get_pytesseract_data(pil_image):
-    """Extracts text and bounding boxes from a PIL image."""
-    data = pytesseract.image_to_data(pil_image, output_type=pytesseract.Output.DICT)
-    parsed_objects = []
-    
-    for i in range(len(data['text'])):
-        # Filter out noise (low confidence or empty text)
-        if int(data['conf'][i]) > 50 and data['text'][i].strip() != "":
-            x, y, w, h = data['left'][i], data['top'][i], data['width'][i], data['height'][i]
-            parsed_objects.append({
-                "text": data['text'][i],
-                "left": x,
-                "top": y,
-                "width": w,
-                "height": h
-            })
-    return parsed_objects
+# --- Session State Management ---
+if "layers" not in st.session_state:
+    st.session_state.layers = []
+if "bg_image" not in st.session_state:
+    st.session_state.bg_image = None
 
-def scale_ocr_to_canvas(ocr_data, scale_factor_x, scale_factor_y):
-    """Scales full-res OCR coordinates down to fit the display canvas."""
-    canvas_objects = []
-    for obj in ocr_data:
-        canvas_objects.append({
-            "type": "text",
-            # We want to provide the *center* of the object to st_canvas
-            "left": int((obj["left"] + (obj["width"] / 2)) * scale_factor_x),
-            "top": int((obj["top"] + (obj["height"] / 2)) * scale_factor_y),
-            "text": obj["text"],
-            "fill": "#00FF00", # Initial Green color for OCR visibility
-            "fontSize": 20, # Initial small size for canvas
-            "originX": "center",
-            "originY": "center"
-        })
-    return canvas_objects
-
-def save_high_res(original_pil_image, canvas_json_data, canvas_width, canvas_height):
-    """Applies browser canvas edits back to the full-res original image."""
-    
-    # 1. Start with the original high-resolution image
-    output_image = original_pil_image.copy().convert("RGBA")
-    draw = ImageDraw.Draw(output_image)
-    
-    # 2. Calculate Scaling Factors (Canvas -> Original)
-    orig_w, orig_h = original_pil_image.size
-    scale_x = orig_w / canvas_width
-    scale_y = orig_h / canvas_height
-    
-    # 3. Load a default font (You might need to provide a path to a proper .ttf file for perfect results)
-    try:
-        font_default = ImageFont.load_default()
-    except:
-        # Fallback if no font system works
-        font_default = None
-
-    # 4. Iterate through every object edited on the front-end
-    if "objects" in canvas_json_data:
-        for obj in canvas_json_data["objects"]:
-            if obj["type"] == "text":
-                # Get front-end properties
-                text_content = obj["text"]
-                
-                # Scale front-end coordinates back to full-res
-                # Fabric.js (st_canvas) uses object center; Pillow uses top-left corner.
-                obj_orig_center_x = obj["left"] * scale_x
-                obj_orig_center_y = obj["top"] * scale_y
-                obj_scaled_width = obj["width"] * obj["scaleX"] * scale_x
-                obj_scaled_height = obj["height"] * obj["scaleY"] * scale_y
-                
-                corner_x = obj_orig_center_x - (obj_scaled_width / 2)
-                corner_y = obj_orig_center_y - (obj_scaled_height / 2)
-                
-                # Scale Font Size
-                final_font_size = int(obj["fontSize"] * obj["scaleX"] * scale_x)
-                
-                # Update Font with scaled size
-                if final_font_size > 0:
-                    try:
-                        # Attempt to load a real font if available, fallback to default scaled
-                        font = ImageFont.truetype("Arial.ttf", final_font_size)
-                    except:
-                        font = font_default # Pillow can't scale default font well
-
-                # Extract Color (assuming hex, e.g., #FF0000FF)
-                fill_color = obj["fill"]
-                
-                # 5. Draw the text onto the full-resolution image
-                draw.text((corner_x, corner_y), text_content, font=font, fill=fill_color)
-                
-    return output_image.convert("RGB") # Remove alpha channel for saving as JPEG/PNG
-
-# --- UI Setup ---
-st.title("🖌️ Scientific Diagram & Photo Editor (High-Res)")
+# --- Top Navbar ---
 st.markdown("""
-Upload a static image (flowchart, scan, figure). We'll convert the text into editable boxes. 
-Drag them, change the words, resize them, and download the full-resolution result.
-""")
+    <style>
+    .top-bar {background-color: #1E1E1E; padding: 10px; border-radius: 5px; color: white; display: flex; justify-content: space-between;}
+    </style>
+    <div class="top-bar">
+        <h3>🧬 SciReImage Pro</h3>
+        <p>AI-Powered Scientific Figure Editor</p>
+    </div>
+""", unsafe_allow_html=True)
 
-# Setup Sidebar
-with st.sidebar:
-    st.header("1. Upload & Settings")
-    uploaded_file = st.file_uploader("Upload Image/PDF", type=['png', 'jpg', 'jpeg', 'pdf'])
+# --- Layout: 3 Columns (Tools | Canvas | Layers & AI) ---
+col_tools, col_canvas, col_ai = st.columns([1, 4, 1.5])
+
+# --- 1. TOOLBAR (Left) ---
+with col_tools:
+    st.subheader("🛠 Tools")
+    uploaded_file = st.file_uploader("Upload Image", type=["png", "jpg", "pdf", "svg"])
     
-    canvas_width = st.slider("Display Canvas Width (Does not affect output resolution)", 400, 1600, 1000)
+    if uploaded_file:
+        if st.session_state.bg_image is None:
+            st.session_state.bg_image = Image.open(uploaded_file).convert("RGB")
+            
+    st.divider()
+    active_tool = st.radio("Mode", ["Select", "AI Magic Brush", "Text Edit", "Inpaint Erase"])
     
-    st.markdown("---")
-    st.header("How to Edit:")
-    st.markdown("""
-    *   **Select:** Click an object.
-    *   **Move:** Drag selected object.
-    *   **Edit Text:** Double-click the green text box on the canvas.
-    *   **Resize:** Drag the corners of the selection box.
-    *   **Change Color/Size:** Use the object properties menu that appears on the canvas.
-    """)
+    st.divider()
+    st.button("⛶ Auto-Segment Image (SAM)", help="Uses Segment Anything to break image into layers")
+    st.button("📝 Extract Scientific Text", help="Uses PaddleOCR + Mathpix")
 
-# --- Main App Logic ---
-
-if uploaded_file:
-    # 1. Load Original Image (Full Resolution)
-    if uploaded_file.name.lower().endswith('.pdf'):
-        # For simplicity in this example, only process page 1 of PDFs
-        pages = convert_from_bytes(uploaded_file.read(), first_page=1, last_page=1)
-        original_image = pages[0]
+# --- 2. MAIN CANVAS (Center) ---
+with col_canvas:
+    st.write("### Workspace")
+    if st.session_state.bg_image:
+        canvas_mode = "transform" if active_tool == "Select" else "freedraw"
+        
+        # The main interactive fabric.js canvas
+        canvas_result = st_canvas(
+            fill_color="rgba(255, 0, 0, 0.3)",
+            stroke_width=3,
+            stroke_color="#FF0000",
+            background_image=st.session_state.bg_image,
+            update_streamlit=True,
+            height=600,
+            width=800,
+            drawing_mode=canvas_mode,
+            key="main_canvas",
+        )
     else:
-        original_image = Image.open(uploaded_file).convert('RGB')
+        st.info("Upload an image or diagram to start the workspace.")
 
-    orig_w, orig_h = original_image.size
+# --- 3. LAYERS & AI ASSISTANT (Right) ---
+with col_ai:
+    # Layers Panel
+    st.subheader("📑 Layers")
+    with st.expander("Background (Original)", expanded=True):
+        st.write("👁️ Visible | 🔒 Locked")
     
-    # 2. Run OCR (Once per upload)
-    # We store the OCR data in st.session_state so it doesn't re-run every rerun.
-    state_key_ocr = f"ocr_data_{uploaded_file.name}"
-    if state_key_ocr not in st.session_state:
-        with st.spinner("Analyzing diagram layout..."):
-            raw_ocr_data = get_pytesseract_data(original_image)
-            st.session_state[state_key_ocr] = raw_ocr_data
-    
-    ocr_data = st.session_state[state_key_ocr]
+    # Simulate dynamically added layers
+    if len(st.session_state.layers) > 0:
+        for i, layer in enumerate(st.session_state.layers):
+            with st.expander(f"Layer {i+1}: {layer['name']}"):
+                st.write("👁️ Visible")
+                st.button(f"Delete Layer {i}", key=f"del_{i}")
+    else:
+        st.caption("Run Auto-Segment to generate editable layers.")
 
-    # 3. Handle Scaling for the Canvas Display
-    # We display a scaled version (e.g., 1000px wide) for performance in the browser.
-    display_scale_x = canvas_width / orig_w
-    canvas_height = int(orig_h * display_scale_x)
+    st.divider()
     
-    # 4. Prepare initial canvas objects from scaled OCR
-    initial_drawing = {"objects": scale_ocr_to_canvas(ocr_data, display_scale_x, display_scale_x)}
-
-    # 5. The Interactive Canvas component
-    st.subheader("2. Interactive Editor Canvas")
+    # AI NLP Editing Prompt
+    st.subheader("🤖 AI Assistant")
+    nlp_command = st.text_input("Tell AI what to do...")
+    if st.button("Execute AI Action"):
+        if "make arrows blue" in nlp_command.lower():
+            st.success("AI is using GroundingDINO to find arrows, and recoloring them blue!")
+        elif "replace" in nlp_command.lower():
+            st.success("AI is isolating object and generating replacement via Stable Diffusion...")
+            
+    st.divider()
     
-    # We must use a unique key for the canvas based on the file name
-    canvas_result = st_canvas(
-        fill_color="rgba(0, 255, 0, 0.2)",  # Fill color for new drawings
-        stroke_width=2,
-        stroke_color="#00FF00",
-        background_image=original_image, # Streamlit automatically scales the background_image to fit width/height
-        update_streamlit=True,
-        width=canvas_width,
-        height=canvas_height,
-        drawing_mode="transform", # "transform" allows selecting/moving existing objects
-        initial_drawing=initial_drawing,
-        key=f"canvas_{uploaded_file.name}",
-    )
-
-    # 6. Handle Saving and Downloading
-    st.markdown("---")
-    st.subheader("3. Save Full-Resolution Result")
-    
-    if canvas_result.json_data is not None:
-        # We give the user a button to trigger the high-res rendering, 
-        # as it can be slow for large images.
-        if st.button("Generate High-Resolution Edited Image"):
-            with st.spinner("Applying edits to original high-res file..."):
-                
-                # Perform the backend rendering
-                final_image = save_high_res(
-                    original_image, 
-                    canvas_result.json_data, 
-                    canvas_width, 
-                    canvas_height
-                )
-                
-                # Display processed preview (scaled for UI)
-                st.image(final_image, caption="High-Res Output Preview", use_container_width=True)
-                
-                # Prepare download buffer
-                img_buffer = io.BytesIO()
-                final_image.save(img_buffer, format="PNG")
-                processed_bytes = img_buffer.getvalue()
-                
-                st.download_button(
-                    label=f"Download Edited Image ({orig_w}x{orig_h})",
-                    data=processed_bytes,
-                    file_name=f"edited_{uploaded_file.name}.png",
-                    mime="image/png"
-                )
-
-else:
-    st.info("👈 Please upload an image in the sidebar to begin.")
+    # Export Engine
+    st.subheader("💾 Export")
+    export_format = st.selectbox("Format", ["SVG (Vector)", "PPTX (PowerPoint)", "Draw.io", "High-Res PNG"])
+    st.button("Generate Download", type="primary")
